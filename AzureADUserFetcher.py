@@ -1,6 +1,7 @@
 import requests
 import base64
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class AzureADUserFetcher:
     """
@@ -16,21 +17,21 @@ class AzureADUserFetcher:
     - Obtains an OAuth2 access token using the client credentials flow.
     - Searches for users based on their display name.
     - Retrieves user details including name, email, job title, department, and office location.
-    - Fetches and decodes the user's profile picture (thumbnail) in base64 format.
+    - Can be disabled: Fetches and decodes the user's profile picture (thumbnail) in base64 format, in a thread safe way.
 
     Usage:
     - The class is initialized with the tenant ID, client ID, and client secret from Azure AD and requires Approved Application authorization
 
     Author: Christian Wittenberg.
     """
-        
-    def __init__(self, tenant_id, client_id, client_secret):
+    def __init__(self, tenant_id, client_id, client_secret, retrieve_thumbnails=True):
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.client_secret = client_secret
         self.token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
         self.graph_endpoint = "https://graph.microsoft.com/v1.0/users"
         self.access_token = self.get_access_token()
+        self.retrieve_thumbnails = retrieve_thumbnails
 
     def get_access_token(self):
         headers = {
@@ -46,7 +47,7 @@ class AzureADUserFetcher:
         response.raise_for_status()
         return response.json()['access_token']
 
-    def search_user_by_name(self, name, thumbnail_as_html_base64=True):
+    def search_user_by_name(self, name):
         headers = {
             'Authorization': f'Bearer {self.access_token}'
         }
@@ -57,21 +58,19 @@ class AzureADUserFetcher:
         users = response.json().get('value', [])
         
         user_details = []
-        for user in users:
-            print(user)
-            details = {
-                'Name': user.get('displayName'),
-                'Email': user.get('mail'),
-                'Role': user.get('jobTitle'),
-                'Department': user.get('department'),
-                'Location': user.get('officeLocation'),
-                'Thumbnail': self.get_user_thumbnail(user.get('id'), not thumbnail_as_html_base64)
-            }
-            user_details.append(details)
+        if self.retrieve_thumbnails:
+            with ThreadPoolExecutor() as executor:
+                futures = {executor.submit(self.get_user_thumbnail, user['id']): user for user in users}
+                for future in as_completed(futures):
+                    user = futures[future]
+                    user['Thumbnail'] = future.result()
+                    user_details.append(user)
+        else:
+            user_details = users
         
         return user_details
 
-    def get_user_thumbnail(self, user_id, skip_prefix=True):
+    def get_user_thumbnail(self, user_id):
         headers = {
             'Authorization': f'Bearer {self.access_token}',
             'Accept': 'image/jpg'  # You can specify the image format you expect
@@ -81,59 +80,49 @@ class AzureADUserFetcher:
         
         if response.status_code == 200:
             # Convert the image to base64
+            # you can add "data:image/jpg;base64," to the beginning of below string to embed it in HTML <img> tag as SRC!!!
             image_base64 = base64.b64encode(response.content).decode('utf-8')
-
-            if skip_prefix:
-                return image_base64
-            else:
-                return "data:image/jpg;base64," + image_base64
+            return image_base64
         else:
             return None  # Handle cases where the image is not found
 
-    def get_user_details(self, user_id):
-        headers = {
-            'Authorization': f'Bearer {self.access_token}'
-        }
-        user_url = f"https://graph.microsoft.com/v1.0/users/{user_id}"
-        response = requests.get(user_url, headers=headers)
-        response.raise_for_status()
-        return response.json()
 
 
-# Just for demonstration purposes (this call should go into an API)
-# call the AzureADUserFetcher class to search for a user by name and save its thumbnail image to disk
-
+# example, how to use the class - just based on commandline, but you'll want to embed this as Flask API or someting.
 if __name__ == "__main__":
     # Set up command-line argument parsing
     parser = argparse.ArgumentParser(description="Search for a user in Azure AD and get their details.")
     parser.add_argument("username", help="The name of the user you want to search for.")
+    parser.add_argument("--no-thumbnails", action="store_true", help="Do not retrieve user thumbnails.")
     args = parser.parse_args()
 
     tenant_id = ''
     client_id = ''
     client_secret = ''
 
-    azure_ad = AzureADUserFetcher(tenant_id, client_id, client_secret)
+    azure_ad = AzureADUserFetcher(tenant_id, client_id, client_secret, retrieve_thumbnails=not args.no_thumbnails)
     
+    # Use the username provided as a command-line argument
     user_name = args.username
-    user_info = azure_ad.search_user_by_name(user_name, False) #set to True to retrieve image for embedding in HTML IMG tag
+    user_info = azure_ad.search_user_by_name(user_name)
     
     if user_info:
         for user in user_info:
-            #print all fields in user except the thumbnail field
-            for key, value in user.items():
-                if key != 'Thumbnail':
-                    print(f"{key}: {value}")
-
-            if user['Thumbnail']:
+            if user.get('Thumbnail'):
                 # Decode the base64 string and write it to a .jpg file
-                # On the frontend - all you need to do is to embed the base64 in an <img> as data and it would show
-                # For demonstrtion purposes just writing it to disk
-                img_data = base64.b64decode(user['Thumbnail'])
-                with open(f"{user['Name']}.jpg", "wb") as f:
+                img_data = base64.b64decode(user['Thumbnail'])                
+
+                with open(f"{user['displayName']}.jpg", "wb") as f:
                     f.write(img_data)
-                print(f"Thumbnail image saved as {user_name}.jpg")
+                print(f"Thumbnail image saved as {user['displayName']}.jpg")                
+            elif args.no_thumbnails:
+                print("Thumbnails were not retrieved as per the user request.")
             else:
-                print(f"No thumbnail available for {user['Name']}")
+                print(f"No thumbnail available for {user['displayName']}")
+
+            if 'Thumbnail' in user:
+                user.pop('Thumbnail')
+                
+            print(user)
     else:
-        print(f"No user found with the name {user_name}")
+        print(f"No user found with the name '{user_name}'")
