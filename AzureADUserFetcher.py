@@ -46,7 +46,7 @@ class AzureADUserFetcher:
         response.raise_for_status()
         return response.json()['access_token']
 
-    def search_user_by_name(self, name):
+    def search_user_by_name(self, name, thumbnail_as_html_base64=True):
         headers = {
             'Authorization': f'Bearer {self.access_token}'
         }
@@ -58,19 +58,20 @@ class AzureADUserFetcher:
         
         user_details = []
         for user in users:
+            print(user)
             details = {
                 'Name': user.get('displayName'),
                 'Email': user.get('mail'),
                 'Role': user.get('jobTitle'),
                 'Department': user.get('department'),
                 'Location': user.get('officeLocation'),
-                'Thumbnail': self.get_user_thumbnail(user.get('id'))
+                'Thumbnail': self.get_user_thumbnail(user.get('id'), not thumbnail_as_html_base64)
             }
             user_details.append(details)
         
         return user_details
 
-    def get_user_thumbnail(self, user_id):
+    def get_user_thumbnail(self, user_id, skip_prefix=True):
         headers = {
             'Authorization': f'Bearer {self.access_token}',
             'Accept': 'image/jpg'  # You can specify the image format you expect
@@ -81,14 +82,27 @@ class AzureADUserFetcher:
         if response.status_code == 200:
             # Convert the image to base64
             image_base64 = base64.b64encode(response.content).decode('utf-8')
-            return image_base64
+
+            if skip_prefix:
+                return image_base64
+            else:
+                return "data:image/jpg;base64," + image_base64
         else:
             return None  # Handle cases where the image is not found
 
+    def get_user_details(self, user_id):
+        headers = {
+            'Authorization': f'Bearer {self.access_token}'
+        }
+        user_url = f"https://graph.microsoft.com/v1.0/users/{user_id}"
+        response = requests.get(user_url, headers=headers)
+        response.raise_for_status()
+        return response.json()
 
 
+# Just for demonstration purposes (this call should go into an API)
+# call the AzureADUserFetcher class to search for a user by name and save its thumbnail image to disk
 
-# Main execution
 if __name__ == "__main__":
     # Set up command-line argument parsing
     parser = argparse.ArgumentParser(description="Search for a user in Azure AD and get their details.")
@@ -101,13 +115,16 @@ if __name__ == "__main__":
 
     azure_ad = AzureADUserFetcher(tenant_id, client_id, client_secret)
     
-    # Use the username provided as a command-line argument
     user_name = args.username
-    user_info = azure_ad.search_user_by_name(user_name)
+    user_info = azure_ad.search_user_by_name(user_name, False) #set to True to retrieve image for embedding in HTML IMG tag
     
     if user_info:
         for user in user_info:
-            print(f"User found: {user}")
+            #print all fields in user except the thumbnail field
+            for key, value in user.items():
+                if key != 'Thumbnail':
+                    print(f"{key}: {value}")
+
             if user['Thumbnail']:
                 # Decode the base64 string and write it to a .jpg file
                 # On the frontend - all you need to do is to embed the base64 in an <img> as data and it would show
